@@ -5,6 +5,8 @@
 restaurants.db
 *.sqlite3
 *.db
+*.db.bak
+translations_cache.json
 
 # Виртуальное окружение (в нем лежат гигабайты библиотек, они ставятся из requirements.txt)
 venv/

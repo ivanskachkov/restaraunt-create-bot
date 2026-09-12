@@ -1,8 +1,9 @@
+import json
 import threading
 from html import escape
 from urllib.parse import quote
 
-from . import config, db, deploy, i18n, llm, osm, sales, site_extras
+from . import config, db, deploy, i18n, llm, menu, osm, sales, site_extras
 
 
 def maps_url(name, address, city):
@@ -43,7 +44,13 @@ def _site_line(site_url, status):
             "Включи: Settings → Pages → Source: Deploy from a branch → main / (root)")
 
 
-def format_lead_message(name, address, city, cuisine, contacts, site_url, status, has_ordering, locale):
+def menu_line(dishes):
+    if not dishes:
+        return "🍽 Меню вшито в страницу — правится только перегенерацией"
+    return f"🍽 Меню: {len(dishes['items'])} блюд в menu.json — правится без перегенерации сайта"
+
+
+def format_lead_message(name, address, city, cuisine, contacts, site_url, status, has_ordering, locale, dishes):
     ordering_line = ("🛒 На сайте есть заказ через WhatsApp" if has_ordering
                      else "🛒 Без онлайн-заказа (нет номера в международном формате для WhatsApp)")
     return "\n".join([
@@ -56,6 +63,7 @@ def format_lead_message(name, address, city, cuisine, contacts, site_url, status
         _site_line(site_url, status),
         language_line(locale),
         ordering_line,
+        menu_line(dishes),
         "",
         "📞 <b>Контакты:</b>",
         *contact_lines(contacts, sales.build_short_pitch(name, site_url, locale)),
@@ -126,12 +134,15 @@ def process_city_task(bot, chat_id, city_name):
         html = llm.generate_site(name, cuisine, city_name, address, contacts, locale, with_ordering=bool(wa_number))
 
         if html:
-            html, has_ordering = site_extras.finalize(html, name, deploy.site_url(place_id), wa_number, locale)
-            site_url, status = deploy.deploy_to_github(place_id, html)
+            html, has_ordering, dishes = site_extras.finalize(html, name, deploy.site_url(place_id), wa_number, locale)
+            files = {"index.html": html}
+            if dishes:
+                files[menu.MENU_FILE] = json.dumps(dishes, ensure_ascii=False, indent=2)
+            site_url, status = deploy.deploy_to_github(place_id, files)
             if site_url:
-                db.save_place(place_id, name, site_url, city_name, contacts, has_ordering, locale.country)
+                db.save_place(place_id, name, site_url, city_name, contacts, has_ordering, locale.country, dishes)
                 msg = format_lead_message(name, address, city_name, cuisine, contacts, site_url, status,
-                                          has_ordering, locale)
+                                          has_ordering, locale, dishes)
                 bot.send_message(chat_id, msg, parse_mode="HTML", disable_web_page_preview=True)
                 if status == deploy.SITE_LIVE:
                     send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)

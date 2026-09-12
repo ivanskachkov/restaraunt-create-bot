@@ -67,6 +67,8 @@ def _site_card(place):
     lines += ["", site_line]
     locale = i18n.site_locale(place["country"])
     lines.append(leads.language_line(locale))
+    if place["site_url"]:
+        lines.append(leads.menu_line(place["menu"]))
     wa_text = sales.build_short_pitch(place["name"], place["site_url"], locale) if place["site_url"] else None
     if place["contacts"]:
         lines += ["", "📞 <b>Контакты:</b>", *leads.contact_lines(place["contacts"], wa_text)]

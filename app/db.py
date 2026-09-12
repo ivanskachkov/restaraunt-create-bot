@@ -33,7 +33,7 @@ def init_db():
                      ''')
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(places)")}
         for column, column_type in (("city", "TEXT"), ("contacts", "TEXT"), ("created_at", "TEXT"),
-                                    ("has_ordering", "INTEGER DEFAULT 0"), ("country", "TEXT")):
+                                    ("has_ordering", "INTEGER DEFAULT 0"), ("country", "TEXT"), ("menu", "TEXT")):
             if column not in existing:
                 conn.execute(f"ALTER TABLE places ADD COLUMN {column} {column_type}")
 
@@ -50,17 +50,26 @@ def processed_ids():
         return {row["place_id"] for row in conn.execute("SELECT place_id FROM places")}
 
 
-def save_place(place_id, name, site_url, city, contacts, has_ordering, country):
+def save_place(place_id, name, site_url, city, contacts, has_ordering, country, menu):
     with closing(_connect()) as conn, conn:
         conn.execute("INSERT INTO places (place_id, name, status, site_url, city, contacts, created_at, "
-                     "has_ordering, country) VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)",
+                     "has_ordering, country, menu) VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?)",
                      (place_id, name, site_url, city, json.dumps(contacts, ensure_ascii=False),
-                      datetime.now().isoformat(sep=" ", timespec="minutes"), int(has_ordering), country))
+                      datetime.now().isoformat(sep=" ", timespec="minutes"), int(has_ordering), country,
+                      json.dumps(menu, ensure_ascii=False) if menu else None))
+
+
+def save_menu(place_id, menu):
+    """Меню правится без перегенерации сайта, поэтому хранится отдельно от HTML."""
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE places SET menu=? WHERE place_id=?",
+                     (json.dumps(menu, ensure_ascii=False), place_id))
 
 
 def _row_to_place(row):
     place = dict(row)
     place["contacts"] = json.loads(place["contacts"]) if place["contacts"] else None
+    place["menu"] = json.loads(place["menu"]) if place["menu"] else None
     return place
 
 

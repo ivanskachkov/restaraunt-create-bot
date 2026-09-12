@@ -3,7 +3,7 @@ import threading
 import time
 
 import requests
-from github import Github
+from github import Github, InputGitTreeElement
 
 from . import config
 
@@ -28,16 +28,16 @@ def site_url(place_id):
 
 
 def delete_site(place_id):
-    """Удаляет страницу из репозитория. True, если её там больше нет."""
-    file_path = f"{place_id}/index.html"
+    """Удаляет страницу и её меню из репозитория. True, если их там больше нет."""
     try:
         _, repo = _get_repo()
         with _github_deploy_lock:
             try:
-                contents = repo.get_contents(file_path, ref="main")
+                contents = repo.get_contents(place_id, ref="main")
             except Exception:
                 return True  # уже удалена
-            repo.delete_file(contents.path, f"Remove site for {place_id} (refused)", contents.sha, branch="main")
+            for item in contents if isinstance(contents, list) else [contents]:
+                repo.delete_file(item.path, f"Remove site for {place_id} (refused)", item.sha, branch="main")
         return True
     except Exception as e:
         print(f"🚨 Не удалось удалить сайт {place_id}: {e}")
@@ -72,25 +72,45 @@ SITE_BUILDING = "building"
 SITE_PAGES_DISABLED = "pages_disabled"
 
 
-def deploy_to_github(place_id, html_content):
-    """Публикует сайт. Возвращает (url, статус): SITE_LIVE, SITE_BUILDING или SITE_PAGES_DISABLED."""
+def _commit_together(repo, files, message):
+    """Все файлы сайта одним коммитом: каждый коммит запускает сборку Pages и отменяет предыдущую."""
+    elements = [InputGitTreeElement(path, "100644", "blob", content) for path, content in files.items()]
+    parent = repo.get_git_commit(repo.get_branch("main").commit.sha)
+    tree = repo.create_git_tree(elements, parent.tree)
+    commit = repo.create_git_commit(message, tree, [parent])
+    repo.get_git_ref("heads/main").edit(commit.sha)
+
+
+def _commit_one_by_one(repo, files, message):
+    for path, content in files.items():
+        try:
+            contents = repo.get_contents(path, ref="main")
+            repo.update_file(contents.path, message, content, contents.sha, branch="main")
+        except Exception:
+            repo.create_file(path, message, content, branch="main")
+
+
+def deploy_to_github(place_id, files):
+    """Публикует файлы сайта ({"index.html": ..., "menu.json": ...}).
+
+    Возвращает (url, статус): SITE_LIVE, SITE_BUILDING или SITE_PAGES_DISABLED.
+    """
     try:
         _, repo = _get_repo()
     except Exception:
         print(f"🚨 Репозиторий '{config.GITHUB_REPO}' не найден.")
         return None, None
 
-    file_path = f"{place_id}/index.html"
+    files = {f"{place_id}/{filename}": content for filename, content in files.items()}
     pages_url = site_url(place_id)
 
     with _github_deploy_lock:
         try:
             try:
-                contents = repo.get_contents(file_path, ref="main")
-                repo.update_file(contents.path, f"Update site for {place_id}", html_content, contents.sha,
-                                 branch="main")
-            except Exception:
-                repo.create_file(file_path, f"Init site for {place_id}", html_content, branch="main")
+                _commit_together(repo, files, f"Site for {place_id}")
+            except Exception as e:
+                print(f"⚠️ Не вышло одним коммитом ({e}), публикую файлы по одному...")
+                _commit_one_by_one(repo, files, f"Site for {place_id}")
 
             time.sleep(3)  # Краткая пауза для стабильности API
         except Exception as e:

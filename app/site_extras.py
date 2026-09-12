@@ -3,7 +3,7 @@ import json
 import re
 from html import escape
 
-from . import i18n
+from . import i18n, menu
 
 DEMO_BANNER_ID = "demo-concept-banner"
 ORDER_WIDGET_ID = "order-widget"
@@ -13,9 +13,6 @@ _ORDER_WIDGET = r"""
 (function () {
   var PHONE = __PHONE__;
   var L = __LABELS__;
-  var cards = document.querySelectorAll("[data-dish][data-price]");
-  if (!cards.length) return;
-
   var table = new URLSearchParams(location.search).get("table");
   var cart = [];
   var FONT = "font-family:system-ui,-apple-system,sans-serif;";
@@ -92,21 +89,29 @@ _ORDER_WIDGET = r"""
     panel.appendChild(send);
   }
 
-  cards.forEach(function (card) {
-    var add = el("button", BTN, L.add_to_order);
-    add.addEventListener("click", function () {
-      var name = card.getAttribute("data-dish");
-      var item = cart.filter(function (it) { return it.name === name; })[0];
-      if (item) {
-        item.qty++;
-      } else {
-        cart.push({name: name, qty: 1, price: parseFloat(card.getAttribute("data-price")) || 0,
-                   currency: card.getAttribute("data-currency") || ""});
-      }
-      render();
+  function bind() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-dish][data-price]"), function (card) {
+      if (card.getAttribute("data-order-bound")) return;
+      card.setAttribute("data-order-bound", "1");
+      var add = el("button", BTN, L.add_to_order);
+      add.addEventListener("click", function () {
+        var name = card.getAttribute("data-dish");
+        var item = cart.filter(function (it) { return it.name === name; })[0];
+        if (item) {
+          item.qty++;
+        } else {
+          cart.push({name: name, qty: 1, price: parseFloat(card.getAttribute("data-price")) || 0,
+                     currency: card.getAttribute("data-currency") || ""});
+        }
+        render();
+      });
+      card.appendChild(add);
     });
-    card.appendChild(add);
-  });
+  }
+
+  bind();
+  // Карточки подставляются из menu.json уже после загрузки — к новым кнопки вешаем заново
+  document.addEventListener("__RENDERED_EVENT__", bind);
 })();
 </script>
 """
@@ -165,15 +170,19 @@ def add_order_widget(html, wa_number, locale):
     # "</" внутри <script> закрыл бы тег раньше времени, если он встретится в переводе
     labels = json.dumps({k: strings[k] for k in keys}, ensure_ascii=False).replace("</", "<\\/")
     return _insert_before_body_end(html, _ORDER_WIDGET.replace("__PHONE__", json.dumps(wa_number))
-                                   .replace("__LABELS__", labels))
+                                   .replace("__LABELS__", labels)
+                                   .replace("__RENDERED_EVENT__", menu.RENDERED_EVENT))
 
 
 def finalize(html, name, site_url, wa_number, locale):
-    """Возвращает (готовый HTML, есть ли на сайте заказ)."""
+    """Возвращает (готовый HTML, есть ли на сайте заказ, меню для menu.json)."""
     # Корзина работает только если модель разметила карточки меню и есть куда отправлять заказ
     has_ordering = bool(wa_number) and "data-dish=" in html and "data-price=" in html
+    dishes, html = menu.extract(html, locale)
     html = add_demo_markers(html, name, locale)
     html = add_og_tags(html, name, site_url, has_ordering, locale)
+    if dishes:
+        html = _insert_before_body_end(html, menu.renderer_script())
     if has_ordering:
         html = add_order_widget(html, wa_number, locale)
-    return html, has_ordering
+    return html, has_ordering, dishes

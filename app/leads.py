@@ -1,3 +1,4 @@
+import threading
 from html import escape
 from urllib.parse import quote
 
@@ -30,10 +31,19 @@ def language_line(locale):
     return f"🌍 Язык сайта: {escape(languages)} · валюта {escape(locale.currency_code)}"
 
 
-def format_lead_message(name, address, city, cuisine, contacts, site_url, is_live, has_ordering, locale):
-    site_line = (f'🌐 <b>Готовый сайт:</b> <a href="{escape(site_url)}">{escape(site_url)}</a>' if is_live
-                 else f"⚠️ <b>Сайт залит, но не открывается:</b> {escape(site_url)}\n"
-                      f"(проверь, включён ли GitHub Pages в настройках репозитория)")
+def _site_line(site_url, status):
+    link = f'<a href="{escape(site_url)}">{escape(site_url)}</a>'
+    if status == deploy.SITE_LIVE:
+        return f"🌐 <b>Готовый сайт:</b> {link}"
+    if status == deploy.SITE_BUILDING:
+        return (f"⏳ <b>Сайт собирается на GitHub:</b> {link}\n"
+                "Обычно это занимает 1–5 минут. Пришлю сообщение, когда он откроется, — вместе с текстом "
+                "предложения, чтобы ты не отправил владельцу нерабочую ссылку.")
+    return (f"⚠️ <b>Сайт залит, но GitHub Pages выключен:</b> {link}\n"
+            "Включи: Settings → Pages → Source: Deploy from a branch → main / (root)")
+
+
+def format_lead_message(name, address, city, cuisine, contacts, site_url, status, has_ordering, locale):
     ordering_line = ("🛒 На сайте есть заказ через WhatsApp" if has_ordering
                      else "🛒 Без онлайн-заказа (нет номера в международном формате для WhatsApp)")
     return "\n".join([
@@ -41,8 +51,9 @@ def format_lead_message(name, address, city, cuisine, contacts, site_url, is_liv
         f"📍 Адрес: {escape(address)}",
         f'🗺 <a href="{escape(maps_url(name, address, city))}">Открыть карточку в Google Maps</a>',
         f"🍕 Тип: {escape(cuisine)}",
+        f"🕒 График в OSM: {escape(contacts['opening_hours'])}",
         "",
-        site_line,
+        _site_line(site_url, status),
         language_line(locale),
         ordering_line,
         "",
@@ -60,6 +71,17 @@ def send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale):
     #     caption += (f"\n\nДля конкретного столика добавь в ссылку номер — тогда он придёт в заказе:\n"
     #                 f"{site_url}?table=5")
     # bot.send_photo(chat_id, sales.make_qr_png(site_url), caption=caption)
+
+
+def _notify_when_live(bot, chat_id, name, site_url, has_ordering, locale):
+    if deploy.wait_until_live(site_url, config.PAGES_FOLLOWUP_SECONDS):
+        bot.send_message(chat_id, f'✅ Сайт «{escape(name)}» открылся: <a href="{escape(site_url)}">{escape(site_url)}</a>',
+                         parse_mode="HTML", disable_web_page_preview=True)
+        send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)
+    else:
+        minutes = config.PAGES_FOLLOWUP_SECONDS // 60
+        bot.send_message(chat_id, f"⚠️ Сайт «{name}» так и не открылся за {minutes} минут. Проверь вкладку Actions "
+                                  f"в репозитории {config.GITHUB_REPO}: там видно, собралась ли страница.")
 
 
 def process_city_task(bot, chat_id, city_name):
@@ -105,13 +127,17 @@ def process_city_task(bot, chat_id, city_name):
 
         if html:
             html, has_ordering = site_extras.finalize(html, name, deploy.site_url(place_id), wa_number, locale)
-            site_url, is_live = deploy.deploy_to_github(place_id, html)
+            site_url, status = deploy.deploy_to_github(place_id, html)
             if site_url:
                 db.save_place(place_id, name, site_url, city_name, contacts, has_ordering, locale.country)
-                msg = format_lead_message(name, address, city_name, cuisine, contacts, site_url, is_live,
+                msg = format_lead_message(name, address, city_name, cuisine, contacts, site_url, status,
                                           has_ordering, locale)
                 bot.send_message(chat_id, msg, parse_mode="HTML", disable_web_page_preview=True)
-                send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)
+                if status == deploy.SITE_LIVE:
+                    send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)
+                elif status == deploy.SITE_BUILDING:
+                    threading.Thread(target=_notify_when_live, daemon=True,
+                                     args=(bot, chat_id, name, site_url, has_ordering, locale)).start()
                 processed_count += 1
 
     if processed_count:

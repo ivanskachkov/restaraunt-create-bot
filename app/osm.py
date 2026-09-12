@@ -1,5 +1,7 @@
+import re
 import time
 from dataclasses import dataclass
+from datetime import date
 
 import requests
 
@@ -173,6 +175,27 @@ class OverpassUnavailableError(Exception):
     """Все зеркала Overpass недоступны — временная проблема сервиса, не города."""
 
 
+# Префиксы жизненного цикла OSM: "disused:amenity=pub" значит "здесь был паб, он закрылся"
+LIFECYCLE_PREFIXES = ("disused:", "was:", "abandoned:", "demolished:", "razed:", "removed:")
+CLOSED_HOURS = re.compile(r"^\s*(closed|off)\s*$", re.I)
+
+
+def looks_closed(tags):
+    """Признаки закрытия, которые видны в самом OSM."""
+    if CLOSED_HOURS.match(tags.get("opening_hours", "")):
+        return True
+    if any(key.startswith(LIFECYCLE_PREFIXES) for key in tags):
+        return True
+    end_date = tags.get("end_date", "")
+    return bool(end_date) and end_date[:10] <= date.today().isoformat()
+
+
+def freshness(element):
+    """Когда данные о заведении последний раз подтверждали: явная дата проверки или последняя правка."""
+    tags = element.get("tags", {})
+    return max(d[:10] for d in (tags.get("check_date", ""), tags.get("survey:date", ""), element.get("timestamp", "")))
+
+
 @dataclass
 class LeadSearch:
     leads: list        # заведения, взятые в работу (не больше limit)
@@ -197,9 +220,12 @@ def fetch_leads(city_name, exclude_ids, limit):
     # Без контактов лид бесполезен — связаться не с кем. Фильтр именно в запросе:
     # у ~90% заведений контактов нет.
     contact_filter = f'[~"^({"|".join(CONTACT_KEYS)})$"~"."]'
-    filters = no_site_filter + chain_filter + contact_filter
+    # Без графика работы слишком высок шанс, что заведение давно закрыто, а в OSM этого не отметили
+    hours_filter = '["opening_hours"]'
+    filters = no_site_filter + chain_filter + contact_filter + hours_filter
     # Лимита вроде "out 30" нет намеренно: иначе, когда первые 30 обработаны,
     # до остальных заведений города бот не добрался бы никогда.
+    # meta — ради даты последней правки: сначала берём заведения, данные о которых свежее.
     query = f"""
     [out:json][timeout:60][bbox:{south},{west},{north},{east}];
     (
@@ -207,7 +233,7 @@ def fetch_leads(city_name, exclude_ids, limit):
       nwr["amenity"~"^({config.FOOD_AMENITIES})$"]["name:uk"]{filters};
       nwr["amenity"~"^({config.FOOD_AMENITIES})$"]["name:ru"]{filters};
     );
-    out center;
+    out center meta;
     """
 
     try:
@@ -217,6 +243,7 @@ def fetch_leads(city_name, exclude_ids, limit):
         raise OverpassUnavailableError(str(e)) from e
 
     candidates = []
+    closed_count = 0
     for place in response.json().get("elements", []):
         tags = place.get("tags", {})
         has_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
@@ -224,10 +251,15 @@ def fetch_leads(city_name, exclude_ids, limit):
         is_chain = tags.get("brand") or tags.get("brand:wikidata")
         has_contact = any(tags.get(k) for k in CONTACT_KEYS)
         if not has_website and has_name and not is_chain and has_contact:
-            candidates.append(place)
+            if looks_closed(tags):
+                closed_count += 1
+            else:
+                candidates.append(place)
 
+    candidates.sort(key=freshness, reverse=True)
     new_places = [p for p in candidates if place_id_of(p) not in exclude_ids]
-    print(f"✅ Найдено с контактами и без сайта: {len(candidates)}, из них новых: {len(new_places)}")
+    print(f"✅ Найдено с контактами, графиком и без сайта: {len(candidates)}, из них новых: {len(new_places)} "
+          f"(отброшено с признаками закрытия: {closed_count})")
 
     # Геокодинг адреса медленный (1+ сек на заведение) — делаем только для тех, кого берём в работу
     return LeadSearch([normalize_osm_place(p) for p in new_places[:limit]], len(new_places), len(candidates),

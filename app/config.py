@@ -41,4 +41,5 @@ FOOD_AMENITIES = "restaurant|cafe|bar|pub|food_court"
 # --- ЛИДЫ И ГЕНЕРАЦИЯ ---
 MAX_SITES_PER_REQUEST = 3
 LLM_TIMEOUTS = [90, 120, 180]
-PAGES_WAIT_SECONDS = 90  # Сколько ждать, пока GitHub Pages соберёт страницу
+PAGES_WAIT_SECONDS = 90  # Сколько ждать сборки GitHub Pages, прежде чем перейти к следующему заведению
+PAGES_FOLLOWUP_SECONDS = 20 * 60  # Сколько ещё проверять в фоне, прежде чем сообщить, что сайт не открылся

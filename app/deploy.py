@@ -44,16 +44,16 @@ def delete_site(place_id):
         return False
 
 
-def _wait_until_live(url):
+def wait_until_live(url, seconds):
     """Ждёт, пока GitHub Pages соберёт страницу. Возвращает False, если не дождались."""
-    deadline = time.time() + config.PAGES_WAIT_SECONDS
+    deadline = time.time() + seconds
     while time.time() < deadline:
         try:
             if requests.get(url, timeout=10).status_code == 200:
                 return True
         except requests.exceptions.RequestException:
             pass
-        time.sleep(5)
+        time.sleep(10)
     return False
 
 
@@ -67,13 +67,18 @@ def pages_enabled():
         return False
 
 
+SITE_LIVE = "live"
+SITE_BUILDING = "building"
+SITE_PAGES_DISABLED = "pages_disabled"
+
+
 def deploy_to_github(place_id, html_content):
-    """Публикует сайт. Возвращает (url, доступен_ли_он_уже)."""
+    """Публикует сайт. Возвращает (url, статус): SITE_LIVE, SITE_BUILDING или SITE_PAGES_DISABLED."""
     try:
         _, repo = _get_repo()
     except Exception:
         print(f"🚨 Репозиторий '{config.GITHUB_REPO}' не найден.")
-        return None, False
+        return None, None
 
     file_path = f"{place_id}/index.html"
     pages_url = site_url(place_id)
@@ -90,11 +95,14 @@ def deploy_to_github(place_id, html_content):
             time.sleep(3)  # Краткая пауза для стабильности API
         except Exception as e:
             print(f"🚨 Ошибка GitHub: {e}")
-            return None, False
+            return None, None
 
     # Ждать сборки бессмысленно, если Pages вообще выключен — ссылка всё равно даст 404
     if not repo.has_pages:
         print("⚠️ GitHub Pages выключен — файл закоммичен, но страница не откроется.")
-        return pages_url, False
+        return pages_url, SITE_PAGES_DISABLED
 
-    return pages_url, _wait_until_live(pages_url)
+    # Сборка Pages обычно идёт 30–60 сек, но бывает и 5+ минут; к тому же каждый новый коммит
+    # отменяет незаконченную сборку — страница появится с последней успешной
+    live = wait_until_live(pages_url, config.PAGES_WAIT_SECONDS)
+    return pages_url, SITE_LIVE if live else SITE_BUILDING

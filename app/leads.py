@@ -3,7 +3,7 @@ import threading
 from html import escape
 from urllib.parse import quote
 
-from . import config, db, deploy, i18n, llm, menu, osm, sales, site_extras
+from . import config, db, demo, deploy, i18n, llm, menu, menu_admin, osm, sales, site_extras
 
 
 def maps_url(name, address, city):
@@ -47,7 +47,7 @@ def _site_line(site_url, status):
 def menu_line(dishes):
     if not dishes:
         return "🍽 Меню вшито в страницу — правится только перегенерацией"
-    return f"🍽 Меню: {len(dishes['items'])} блюд в menu.json — правится без перегенерации сайта"
+    return f"🍽 Меню: {menu_admin.summary(dishes)} — правится из бота, без перегенерации сайта"
 
 
 def format_lead_message(name, address, city, cuisine, contacts, site_url, status, has_ordering, locale, dishes):
@@ -92,6 +92,51 @@ def _notify_when_live(bot, chat_id, name, site_url, has_ordering, locale):
                                   f"в репозитории {config.GITHUB_REPO}: там видно, собралась ли страница.")
 
 
+def generate_and_publish(bot, chat_id, place_id, name, cuisine, city, address, contacts, locale, note=None):
+    """Генерирует сайт, публикует его и присылает карточку. Общий путь для лидов и демо."""
+    bot.send_message(chat_id, f"⚙️ Генерирую лендинг: {name}...")
+
+    wa_number = sales.whatsapp_number(contacts)
+    html = llm.generate_site(name, cuisine, city, address, contacts, locale, with_ordering=bool(wa_number))
+    if not html:
+        bot.send_message(chat_id, f"⚠️ Не получилось сгенерировать сайт для «{name}». Попробуй ещё раз.")
+        return False
+
+    html, has_ordering, dishes = site_extras.finalize(html, name, deploy.site_url(place_id), wa_number, locale)
+    files = {"index.html": html}
+    if dishes:
+        files[menu.MENU_FILE] = json.dumps(dishes, ensure_ascii=False, indent=2)
+
+    site_url, status = deploy.deploy_to_github(place_id, files)
+    if not site_url:
+        bot.send_message(chat_id, f"⚠️ Не получилось опубликовать сайт «{name}» на GitHub.")
+        return False
+
+    db.save_place(place_id, name, site_url, city, contacts, has_ordering, locale.country, dishes)
+    message = format_lead_message(name, address, city, cuisine, contacts, site_url, status, has_ordering,
+                                  locale, dishes)
+    bot.send_message(chat_id, message + (f"\n\n{note}" if note else ""), parse_mode="HTML",
+                     disable_web_page_preview=True)
+
+    if status == deploy.SITE_LIVE:
+        send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)
+    elif status == deploy.SITE_BUILDING:
+        threading.Thread(target=_notify_when_live, daemon=True,
+                         args=(bot, chat_id, name, site_url, has_ordering, locale)).start()
+    return True
+
+
+def create_demo_task(bot, chat_id):
+    venue = demo.random_venue()
+    locale = i18n.site_locale(venue["country"])
+    bot.send_message(chat_id, f"🎲 Демо-заведение: <b>{escape(venue['name'])}</b> · {escape(venue['city'])}\n"
+                              f"{language_line(locale)}", parse_mode="HTML")
+    note = ("🧪 <b>Это демо:</b> заведение и контакты выдуманы, продавать его некому — можно спокойно "
+            "всё нажимать.\nПравка меню: /menu → карточка → 🍽 Меню.")
+    generate_and_publish(bot, chat_id, venue["place_id"], venue["name"], venue["cuisine"], venue["city"],
+                         venue["address"], venue["contacts"], locale, note)
+
+
 def process_city_task(bot, chat_id, city_name):
     bot.send_message(chat_id, f"🔍 Ищу рестораны без сайтов: {city_name}...")
 
@@ -120,36 +165,12 @@ def process_city_task(bot, chat_id, city_name):
 
     processed_count = 0
     for p in search.leads:
-        place_id = p.get('place_id')
-        name = p.get('name', 'Без названия')
-        address = p.get('location', {}).get('formatted_address', osm.UNKNOWN_ADDRESS)
-        contacts = p["contacts"]
-
         categories = p.get('categories', [])
         cuisine = categories[0].get('name', 'Ресторан/Кафе') if categories else 'Ресторан/Кафе'
-
-        bot.send_message(chat_id, f"⚙️ Генерирую лендинг: {name}...")
-
-        wa_number = sales.whatsapp_number(contacts)
-        html = llm.generate_site(name, cuisine, city_name, address, contacts, locale, with_ordering=bool(wa_number))
-
-        if html:
-            html, has_ordering, dishes = site_extras.finalize(html, name, deploy.site_url(place_id), wa_number, locale)
-            files = {"index.html": html}
-            if dishes:
-                files[menu.MENU_FILE] = json.dumps(dishes, ensure_ascii=False, indent=2)
-            site_url, status = deploy.deploy_to_github(place_id, files)
-            if site_url:
-                db.save_place(place_id, name, site_url, city_name, contacts, has_ordering, locale.country, dishes)
-                msg = format_lead_message(name, address, city_name, cuisine, contacts, site_url, status,
-                                          has_ordering, locale, dishes)
-                bot.send_message(chat_id, msg, parse_mode="HTML", disable_web_page_preview=True)
-                if status == deploy.SITE_LIVE:
-                    send_sales_kit(bot, chat_id, name, site_url, has_ordering, locale)
-                elif status == deploy.SITE_BUILDING:
-                    threading.Thread(target=_notify_when_live, daemon=True,
-                                     args=(bot, chat_id, name, site_url, has_ordering, locale)).start()
-                processed_count += 1
+        if generate_and_publish(bot, chat_id, p.get('place_id'), p.get('name', 'Без названия'), cuisine, city_name,
+                                p.get('location', {}).get('formatted_address', osm.UNKNOWN_ADDRESS),
+                                p["contacts"], locale):
+            processed_count += 1
 
     if processed_count:
         bot.send_message(chat_id, "✅ Пакет заведений обработан. Пиши город снова для продолжения.\n"

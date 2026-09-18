@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import time
@@ -103,13 +104,20 @@ def _strip_fences(text):
     return re.sub(r'^```[a-zA-Z]*\s*|```\s*$', '', text.strip(), flags=re.MULTILINE).strip()
 
 
-def _generate(prompt, temperature, is_complete, what):
-    """Запрос к Gemini с перебором моделей. Возвращает текст ответа без markdown-обёртки или None."""
+def _generate(prompt, temperature, is_complete, what, image=None):
+    """Запрос к Gemini с перебором моделей. Возвращает текст ответа без markdown-обёртки или None.
+
+    image — (байты, mime-тип) для запросов по картинке, например по фото меню.
+    """
     headers = {'Content-Type': 'application/json'}
+    parts = [{"text": prompt}]
+    if image:
+        data, mime_type = image
+        parts.insert(0, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(data).decode()}})
     # 8192 не хватало: у моделей с "мышлением" размышления тратят тот же бюджет,
     # и на сам HTML оставалось ~300 токенов — страница приходила обрезанной.
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": parts}],
         "generationConfig": {"temperature": temperature, "maxOutputTokens": 32768}
     }
 
@@ -179,6 +187,31 @@ def _is_json_object(text):
         return isinstance(json.loads(text), dict)
     except ValueError:
         return False
+
+
+def parse_menu_photo(image, mime_type, locale):
+    """Распознаёт блюда с фото меню. Возвращает список словарей или None."""
+    english = ('    - "name_en" и "description_en" — перевод названия и описания на английский.\n'
+               if locale.bilingual else "")
+    prompt = f"""
+    На фото — меню заведения. Выпиши из него блюда.
+    Для каждого блюда:
+    - "name" — название ровно как на фото, на языке "{locale.lang}", без цены и без номера позиции.
+    - "description" — состав или описание с фото. Если на фото описания нет — короткое предложение,
+      уместное для этого блюда, не больше 12 слов.
+    - "price" — только число, без валюты и без пробелов (например "12.50").
+{english}
+    Правила:
+    - Не выдумывай блюда, которых на фото нет, и не меняй цены.
+    - Напитки и позиции без цены пропусти.
+    - Если на фото не меню, а что-то другое — верни пустой список.
+    - Верни ТОЛЬКО JSON вида {{"items": [...]}}, без пояснений.
+    """
+    text = _generate(prompt, 0.1, _is_json_object, "Распознаю меню с фото", image=(image, mime_type))
+    if not text:
+        return None
+    items = json.loads(text).get("items")
+    return items if isinstance(items, list) else None
 
 
 def translate_strings(strings, lang):

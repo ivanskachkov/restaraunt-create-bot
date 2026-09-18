@@ -44,12 +44,32 @@ def delete_site(place_id):
         return False
 
 
+def file_url(place_id, filename):
+    return site_url(place_id) + filename
+
+
 def wait_until_live(url, seconds):
     """Ждёт, пока GitHub Pages соберёт страницу. Возвращает False, если не дождались."""
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
             if requests.get(url, timeout=10).status_code == 200:
+                return True
+        except requests.exceptions.RequestException:
+            pass
+        time.sleep(10)
+    return False
+
+
+def wait_until_published(url, needle, seconds):
+    """Ждёт, пока Pages начнёт отдавать обновлённый файл: старый лежит в кэше и отвечает 200,
+    поэтому ждём не код ответа, а появление needle в содержимом."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            response = requests.get(url, params={"t": int(time.time())}, timeout=10,
+                                    headers={"Cache-Control": "no-cache"})
+            if response.status_code == 200 and needle in response.text:
                 return True
         except requests.exceptions.RequestException:
             pass
@@ -90,35 +110,40 @@ def _commit_one_by_one(repo, files, message):
             repo.create_file(path, message, content, branch="main")
 
 
-def deploy_to_github(place_id, files):
-    """Публикует файлы сайта ({"index.html": ..., "menu.json": ...}).
-
-    Возвращает (url, статус): SITE_LIVE, SITE_BUILDING или SITE_PAGES_DISABLED.
-    """
+def commit_files(place_id, files, message=None):
+    """Коммитит файлы сайта ({"index.html": ..., "menu.json": ...}). True, если получилось."""
     try:
         _, repo = _get_repo()
     except Exception:
         print(f"🚨 Репозиторий '{config.GITHUB_REPO}' не найден.")
-        return None, None
+        return False
 
     files = {f"{place_id}/{filename}": content for filename, content in files.items()}
-    pages_url = site_url(place_id)
+    message = message or f"Site for {place_id}"
 
     with _github_deploy_lock:
         try:
             try:
-                _commit_together(repo, files, f"Site for {place_id}")
+                _commit_together(repo, files, message)
             except Exception as e:
                 print(f"⚠️ Не вышло одним коммитом ({e}), публикую файлы по одному...")
-                _commit_one_by_one(repo, files, f"Site for {place_id}")
+                _commit_one_by_one(repo, files, message)
 
             time.sleep(3)  # Краткая пауза для стабильности API
+            return True
         except Exception as e:
             print(f"🚨 Ошибка GitHub: {e}")
-            return None, None
+            return False
 
+
+def deploy_to_github(place_id, files):
+    """Публикует сайт целиком. Возвращает (url, статус): SITE_LIVE, SITE_BUILDING или SITE_PAGES_DISABLED."""
+    if not commit_files(place_id, files):
+        return None, None
+
+    pages_url = site_url(place_id)
     # Ждать сборки бессмысленно, если Pages вообще выключен — ссылка всё равно даст 404
-    if not repo.has_pages:
+    if not pages_enabled():
         print("⚠️ GitHub Pages выключен — файл закоммичен, но страница не откроется.")
         return pages_url, SITE_PAGES_DISABLED
 

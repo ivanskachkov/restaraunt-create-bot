@@ -21,3 +21,6 @@ __pycache__/
 # Системные файлы macOS / Windows
 .DS_Store
 Thumbs.db
+
+# Состояние вкладок редактора: меняется при каждом клике, в истории не нужно
+.idea/claudeCodeEditorTabs.xml
